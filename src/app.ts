@@ -67,6 +67,21 @@ app.get("/health", async () => {
   };
 });
 
+// Manejo de rutas no encontradas
+app.setNotFoundHandler((request, reply) => {
+  reply.status(404).send({
+    statusCode: 404,
+    intOpCode: 1,
+    data: [
+      {
+        message: `El recurso solicitado no existe en el API Gateway.`,
+        path: request.url,
+        method: request.method,
+      },
+    ],
+  });
+});
+
 // Iniciar el servidor
 const start = async () => {
   try {
