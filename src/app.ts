@@ -2,6 +2,7 @@ import Fastify from "fastify";
 import proxy from "@fastify/http-proxy";
 import cors from "@fastify/cors";
 import dotenv from "dotenv";
+import { createClient } from "@supabase/supabase-js";
 
 dotenv.config();
 
@@ -10,9 +11,13 @@ const app = Fastify({
 });
 
 app.register(cors, {
-  origin: "*", //Cambiar a dominios específicos en producción
+  origin: "*", // Cambiar a dominios específicos en producción
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
 });
+
+const supabaseUrl = process.env.SUPABASE_URL || "";
+const supabaseKey = process.env.SUPABASE_ANON_KEY || "";
+const supabase = createClient(supabaseUrl, supabaseKey);
 
 const USERS_SERVICE_URL =
   process.env.USERS_SERVICE_URL || "http://localhost:3001";
@@ -52,6 +57,66 @@ app.register(proxy, {
   upstream: TICKETS_SERVICE_URL,
   prefix: "/api/tickets",
   rewritePrefix: "/api/tickets",
+});
+
+app.addHook("onResponse", async (request, reply) => {
+  if (request.method === "OPTIONS") return;
+
+  const endpoint = request.routeOptions?.url || request.url;
+  const tiempoMs = reply.elapsedTime;
+  const statusCode = reply.statusCode;
+
+  try {
+    await supabase.from("system_logs").insert({
+      endpoint: endpoint,
+      metodo: request.method,
+      ip: request.ip,
+      status_http: statusCode,
+      tiempo_ms: tiempoMs,
+    });
+
+    const { data: metricaActual } = await supabase
+      .from("metrics")
+      .select("*")
+      .eq("endpoint", endpoint)
+      .single();
+
+    if (metricaActual) {
+      const nuevoTotal = metricaActual.total_requests + 1;
+      const nuevoPromedio =
+        (metricaActual.tiempo_respuesta_promedio *
+          metricaActual.total_requests +
+          tiempoMs) /
+        nuevoTotal;
+
+      await supabase
+        .from("metrics")
+        .update({
+          total_requests: nuevoTotal,
+          tiempo_respuesta_promedio: nuevoPromedio,
+        })
+        .eq("endpoint", endpoint);
+    } else {
+      await supabase.from("metrics").insert({
+        endpoint: endpoint,
+        total_requests: 1,
+        tiempo_respuesta_promedio: tiempoMs,
+      });
+    }
+  } catch (error) {
+    request.log.error(error as Error, "Error guardando logs/métricas en Supabase:");
+  }
+});
+
+app.addHook("onError", async (request, reply, error) => {
+  await supabase.from("system_logs").insert({
+    endpoint: request.routeOptions?.url || request.url,
+    metodo: request.method,
+    ip: request.ip,
+    status_http: reply.statusCode || 500,
+    error_stack: error.stack,
+    tiempo_ms: reply.elapsedTime,
+  });
 });
 
 // Ruta de Healthcheck
